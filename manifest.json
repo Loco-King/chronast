@@ -11,6 +11,9 @@
     "type": "git",
     "url": "https://github.com/Loco-King/chronast"
   },
+  "privacy_policies": [
+    "https://github.com/Loco-King/chronast/blob/master/PRIVACY.md"
+  ],
   "server": {
     "type": "node",
     "entry_point": "server.js",

@@ -98,7 +98,9 @@ directory. To fully remove all traces, also delete:
 - macOS/Linux: `~/.chronast/`
 - Windows: `%USERPROFILE%\.chronast\`
 
-## Privacy
+## Privacy Policy
+
+See [PRIVACY.md](PRIVACY.md) for the full policy.
 
 Chronast makes no network requests of any kind. All data (system time,
 state file) stays on your machine.
