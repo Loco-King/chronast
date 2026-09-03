@@ -8,15 +8,15 @@
     "test": "node test.js"
   },
   "keywords": ["mcp", "claude-desktop", "time", "clock"],
-  "author": "locoking",
+  "author": "Loco-King",
   "license": "MIT",
-  "homepage": "https://github.com/locoking/chronast",
+  "homepage": "https://github.com/Loco-King/chronast",
   "repository": {
     "type": "git",
-    "url": "https://github.com/locoking/chronast"
+    "url": "https://github.com/Loco-King/chronast"
   },
   "bugs": {
-    "url": "https://github.com/locoking/chronast/issues"
+    "url": "https://github.com/Loco-King/chronast/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0"

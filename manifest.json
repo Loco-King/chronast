@@ -4,12 +4,12 @@
   "version": "2.0.0",
   "description": "Chronast gives Claude Desktop a real clock: current time/date (with timezone and unix timestamp), elapsed time since last check with a configurable gap threshold, session duration, arbitrary duration calculation, and timezone conversion — with a built-in rule so Claude never comments on your sleep schedule based on the clock. 100% local, no network calls.",
   "author": {
-    "name": "locoking"
+    "name": "Loco-King"
   },
-  "homepage": "https://github.com/locoking/chronast",
+  "homepage": "https://github.com/Loco-King/chronast",
   "repository": {
     "type": "git",
-    "url": "https://github.com/locoking/chronast"
+    "url": "https://github.com/Loco-King/chronast"
   },
   "server": {
     "type": "node",
