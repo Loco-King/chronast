@@ -257,6 +257,54 @@ async function main() {
     check("get_time_since_last_check: tiny custom threshold flags a gap", () => {
       assert.strictEqual(secondParsed.isGap, true);
     });
+
+    await new Promise((r) => setTimeout(r, 20));
+    send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "get_time_since_last_check",
+        arguments: { gap_threshold_minutes: 0 },
+      },
+    });
+    const third = await waitFor(4);
+    const thirdParsed = JSON.parse(third.result.content[0].text);
+    check("get_time_since_last_check: gap_threshold_minutes 0 is applied, not defaulted", () => {
+      assert.strictEqual(thirdParsed.gapThreshold, "0s");
+    });
+
+    send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: {
+        name: "get_time_since_last_check",
+        arguments: { gap_threshold_minutes: -5 },
+      },
+    });
+    const fourth = await waitFor(5);
+    const fourthParsed = JSON.parse(fourth.result.content[0].text);
+    check("get_time_since_last_check: negative gap_threshold_minutes returns an error, not a crash or silent default", () => {
+      assert.strictEqual(fourthParsed.error, "gap_threshold_minutes must be zero or positive");
+    });
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "get_session_duration",
+        arguments: { gap_threshold_minutes: -1 },
+      },
+    });
+    const res = await waitFor(2);
+    const parsed = JSON.parse(res.result.content[0].text);
+    check("get_session_duration: negative gap_threshold_minutes returns an error, not a crash or silent default", () => {
+      assert.strictEqual(parsed.error, "gap_threshold_minutes must be zero or positive");
+    });
   });
 
   await runServerTest(async ({ send, waitFor }) => {
@@ -293,6 +341,23 @@ async function main() {
     });
     check("get_full_context: sinceLastCheck reports firstCheck true on a fresh process", () => {
       assert.strictEqual(parsed.sinceLastCheck.firstCheck, true);
+    });
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "get_full_context",
+        arguments: { gap_threshold_minutes: -10 },
+      },
+    });
+    const res = await waitFor(2);
+    const parsed = JSON.parse(res.result.content[0].text);
+    check("get_full_context: negative gap_threshold_minutes returns an error, not a crash or silent default", () => {
+      assert.strictEqual(parsed.error, "gap_threshold_minutes must be zero or positive");
     });
   });
 

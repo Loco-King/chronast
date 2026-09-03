@@ -95,14 +95,14 @@ function formatDuration(ms) {
 }
 
 function resolveGapThreshold(args) {
-  if (
-    args &&
-    typeof args.gap_threshold_minutes === "number" &&
-    args.gap_threshold_minutes > 0
-  ) {
-    return args.gap_threshold_minutes * 60 * 1000;
+  const raw = args ? args.gap_threshold_minutes : undefined;
+  if (raw === undefined || typeof raw !== "number" || Number.isNaN(raw)) {
+    return { ms: DEFAULT_GAP_THRESHOLD_MS };
   }
-  return DEFAULT_GAP_THRESHOLD_MS;
+  if (raw < 0) {
+    return { error: "gap_threshold_minutes must be zero or positive" };
+  }
+  return { ms: raw * 60 * 1000 };
 }
 
 // A shared closing line baked into every tool's output so the anti-nanny
@@ -183,7 +183,11 @@ const tools = {
     },
     handler: (args) => {
       const now = Date.now();
-      const gapThresholdMs = resolveGapThreshold(args);
+      const gapThreshold = resolveGapThreshold(args);
+      if (gapThreshold.error) {
+        return { error: gapThreshold.error, note: USAGE_NOTE };
+      }
+      const gapThresholdMs = gapThreshold.ms;
       const state = loadState();
       const lastCheck = state.lastCheck;
 
@@ -225,7 +229,11 @@ const tools = {
     },
     handler: (args) => {
       const now = Date.now();
-      const gapThresholdMs = resolveGapThreshold(args);
+      const gapThreshold = resolveGapThreshold(args);
+      if (gapThreshold.error) {
+        return { error: gapThreshold.error, note: USAGE_NOTE };
+      }
+      const gapThresholdMs = gapThreshold.ms;
       const state = loadState();
 
       const gapExceeded =
@@ -397,7 +405,11 @@ const tools = {
     },
     handler: (args) => {
       const now = Date.now();
-      const gapThresholdMs = resolveGapThreshold(args);
+      const gapThreshold = resolveGapThreshold(args);
+      if (gapThreshold.error) {
+        return { error: gapThreshold.error, note: USAGE_NOTE };
+      }
+      const gapThresholdMs = gapThreshold.ms;
       const nowDate = new Date(now);
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
       const state = loadState();
