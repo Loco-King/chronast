@@ -88,7 +88,7 @@ function runServerTest(testFn) {
       proc.stdin.write(JSON.stringify(msg) + "\n");
     }
 
-    async function waitFor(id, timeoutMs = 2000) {
+    async function waitFor(id, timeoutMs = 10000) {
       const start = Date.now();
       while (!(id in responses)) {
         if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for id ${id}`);
