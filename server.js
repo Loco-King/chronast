@@ -64,6 +64,11 @@ function loadState() {
   }
 }
 
+// Synchronous sleep, used only to back off between rename retries below.
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function saveState(state) {
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -71,7 +76,22 @@ function saveState(state) {
     // concurrent read mid-write can't leave a half-written/corrupt file.
     const tmpFile = `${STATE_FILE}.${process.pid}.tmp`;
     fs.writeFileSync(tmpFile, JSON.stringify(state, null, 2), "utf8");
-    fs.renameSync(tmpFile, STATE_FILE);
+
+    // On Windows, renaming over STATE_FILE can transiently fail with
+    // EPERM/EBUSY if something else (commonly antivirus real-time
+    // scanning) briefly holds a handle on it. Retry a few times with a
+    // short backoff before giving up.
+    const maxAttempts = 5;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        fs.renameSync(tmpFile, STATE_FILE);
+        return;
+      } catch (err) {
+        const retryable = err.code === "EPERM" || err.code === "EBUSY";
+        if (!retryable || attempt === maxAttempts) throw err;
+        sleepSync(10 * attempt);
+      }
+    }
   } catch (err) {
     // Non-fatal: if we can't persist, gap/session detection just resets
     // each time. Still safe to continue.
