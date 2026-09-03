@@ -1,6 +1,6 @@
 {
   "name": "chronast",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Gives Claude Desktop a real clock — current time/date, elapsed-time tracking, duration math, and timezone conversion. 100% local, no network calls.",
   "main": "server.js",
   "scripts": {
