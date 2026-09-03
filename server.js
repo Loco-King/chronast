@@ -114,6 +114,64 @@ function formatDuration(ms) {
   return parts.join(" ") || "0s";
 }
 
+// Matches an ISO-8601-style date-time with no UTC offset/Z, e.g.
+// "2026-06-15T12:00:00" or "2026-06-15 12:00:00.500" — the only shape we
+// know how to reinterpret as wall-clock time in an arbitrary IANA zone.
+const NAIVE_ISO_DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$/;
+
+// Returns the given IANA zone's UTC offset (in ms, positive = ahead of
+// UTC) at the moment `instantMs`. Throws if `timeZone` isn't a real zone.
+function offsetMsAt(instantMs, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  })
+    .formatToParts(new Date(instantMs))
+    .reduce((acc, p) => {
+      if (p.type !== "literal") acc[p.type] = p.value;
+      return acc;
+    }, {});
+  const hour = parts.hour === "24" ? 0 : Number(parts.hour);
+  const asUtc = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    hour,
+    Number(parts.minute),
+    Number(parts.second)
+  );
+  return asUtc - instantMs;
+}
+
+// Interprets a naive (no-offset) ISO date-time string as wall-clock time
+// in `timeZone` and returns the corresponding absolute instant in ms
+// since epoch. Returns null if `naiveStr` isn't a shape we recognize.
+// Throws if `timeZone` isn't a real IANA zone.
+function zonedNaiveIsoToUtcMs(naiveStr, timeZone) {
+  const m = naiveStr.match(NAIVE_ISO_DATETIME_RE);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s, frac] = m;
+  const ms = frac ? Math.round(Number(`0.${frac}`) * 1000) : 0;
+  // First guess: treat the wall-clock digits as if they were already UTC.
+  const guessMs = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), s ? Number(s) : 0, ms);
+
+  // Correct by the zone's actual offset at that guess. Re-check once more
+  // in case the offset itself changes near a DST transition boundary.
+  const offset1 = offsetMsAt(guessMs, timeZone);
+  let resultMs = guessMs - offset1;
+  const offset2 = offsetMsAt(resultMs, timeZone);
+  if (offset2 !== offset1) {
+    resultMs = guessMs - offset2;
+  }
+  return resultMs;
+}
+
 function resolveGapThreshold(args) {
   const raw = args ? args.gap_threshold_minutes : undefined;
   if (raw === undefined || typeof raw !== "number" || Number.isNaN(raw)) {
@@ -341,7 +399,11 @@ const tools = {
       "timezone names (e.g. 'America/Toronto', 'Europe/London', " +
       "'Asia/Tokyo'). If 'time' is omitted, the current moment is used. " +
       "If 'from_timezone' is omitted, the system's local timezone is " +
-      "used. " +
+      "used. 'from_timezone' only affects the result when 'time' is a " +
+      "date-time string with no UTC offset (e.g. '2026-06-15T12:00:00', " +
+      "not '...T12:00:00Z') — an offset-bearing or Z-suffixed 'time' " +
+      "already unambiguously specifies an instant, so 'from_timezone' " +
+      "is ignored in that case. " +
       USAGE_NOTE,
     inputSchema: {
       type: "object",
@@ -350,13 +412,18 @@ const tools = {
           type: "string",
           description:
             "Optional. A parseable date/time string. Omit to use the " +
-            "current time.",
+            "current time. Include a UTC offset or 'Z' suffix (e.g. " +
+            "'2026-06-15T12:00:00Z') for an unambiguous instant; omit " +
+            "the offset and pair with 'from_timezone' to specify wall-" +
+            "clock time in a particular zone.",
         },
         from_timezone: {
           type: "string",
           description:
-            "Optional. IANA timezone name the input 'time' is expressed " +
-            "in. Omit to use the system's local timezone.",
+            "Optional. IANA timezone name that 'time' is expressed in, " +
+            "when 'time' has no UTC offset of its own. Omit to use the " +
+            "system's local timezone. No effect if 'time' already has " +
+            "an offset/Z suffix, or is omitted.",
         },
         to_timezones: {
           type: "array",
@@ -371,7 +438,27 @@ const tools = {
     handler: (args) => {
       const sourceTz =
         args.from_timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const inputDate = args.time ? new Date(args.time) : new Date();
+
+      if (args.from_timezone) {
+        try {
+          new Intl.DateTimeFormat(undefined, { timeZone: args.from_timezone });
+        } catch {
+          return {
+            error: `Invalid or unrecognized IANA timezone for from_timezone: "${args.from_timezone}"`,
+            note: USAGE_NOTE,
+          };
+        }
+      }
+
+      let inputDate;
+      if (args.time === undefined || args.time === null) {
+        inputDate = new Date();
+      } else if (args.from_timezone) {
+        const zonedMs = zonedNaiveIsoToUtcMs(args.time.trim(), args.from_timezone);
+        inputDate = zonedMs === null ? new Date(args.time) : new Date(zonedMs);
+      } else {
+        inputDate = new Date(args.time);
+      }
 
       if (isNaN(inputDate.getTime())) {
         return {

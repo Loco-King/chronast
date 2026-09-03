@@ -233,6 +233,108 @@ async function main() {
   });
 
   await runServerTest(async ({ send, waitFor }) => {
+    // Regression test: from_timezone must actually shift a naive (no
+    // offset) input time, not just get echoed back as sourceTimezone
+    // while being silently ignored in the actual computation.
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "convert_time",
+        arguments: { time: "2026-06-15T12:00:00", from_timezone: "Asia/Tokyo", to_timezones: ["UTC"] },
+      },
+    });
+    const res = await waitFor(2);
+    const parsed = JSON.parse(res.result.content[0].text);
+    check("convert_time: from_timezone actually shifts a naive time (Asia/Tokyo noon -> 03:00 UTC)", () => {
+      assert.strictEqual(parsed.sourceTime, "2026-06-15T03:00:00.000Z");
+    });
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "convert_time",
+        arguments: { time: "2026-06-15T12:00:00", from_timezone: "Europe/London", to_timezones: ["UTC"] },
+      },
+    });
+    const res = await waitFor(2);
+    const parsed = JSON.parse(res.result.content[0].text);
+    check("convert_time: from_timezone respects BST (Europe/London noon in June -> 11:00 UTC)", () => {
+      assert.strictEqual(parsed.sourceTime, "2026-06-15T11:00:00.000Z");
+    });
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "convert_time",
+        arguments: { time: "2026-06-15T12:00:00", from_timezone: "Asia/Kolkata", to_timezones: ["UTC"] },
+      },
+    });
+    const res = await waitFor(2);
+    const parsed = JSON.parse(res.result.content[0].text);
+    check("convert_time: from_timezone handles a half-hour offset zone (Asia/Kolkata, UTC+5:30)", () => {
+      assert.strictEqual(parsed.sourceTime, "2026-06-15T06:30:00.000Z");
+    });
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "convert_time",
+        arguments: { time: "2026-06-15T12:00:00Z", from_timezone: "Asia/Tokyo", to_timezones: ["UTC"] },
+      },
+    });
+    const res = await waitFor(2);
+    const parsed = JSON.parse(res.result.content[0].text);
+    check("convert_time: from_timezone is ignored (not applied) when time already has a Z/offset", () => {
+      assert.strictEqual(parsed.sourceTime, "2026-06-15T12:00:00.000Z");
+    });
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "convert_time", arguments: { time: "", to_timezones: ["UTC"] } },
+    });
+    const res = await waitFor(2);
+    const parsed = JSON.parse(res.result.content[0].text);
+    check("convert_time: empty-string time returns an error, aligned with calculate_duration", () => {
+      assert.ok(typeof parsed.error === "string");
+    });
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "convert_time",
+        arguments: { time: "2026-06-15T12:00:00", from_timezone: "Not/ARealZone", to_timezones: ["UTC"] },
+      },
+    });
+    const res = await waitFor(2);
+    const parsed = JSON.parse(res.result.content[0].text);
+    check("convert_time: invalid from_timezone returns an explicit error, not a silent echo", () => {
+      assert.ok(typeof parsed.error === "string" && parsed.error.includes("from_timezone"));
+    });
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
     send({
       jsonrpc: "2.0",
       id: 2,
