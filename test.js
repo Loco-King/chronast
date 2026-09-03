@@ -179,6 +179,26 @@ async function main() {
       jsonrpc: "2.0",
       id: 2,
       method: "tools/call",
+      params: {
+        name: "calculate_duration",
+        arguments: { start: "2026-01-01T00:00:00Z", end: "2026-01-01T00:00:00Z" },
+      },
+    });
+    const res = await waitFor(2);
+    const parsed = JSON.parse(res.result.content[0].text);
+    check("calculate_duration: identical start and end reports direction 'same'", () => {
+      assert.strictEqual(parsed.direction, "same");
+    });
+    check("calculate_duration: identical start and end reports durationMs 0", () => {
+      assert.strictEqual(parsed.durationMs, 0);
+    });
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
       params: { name: "calculate_duration", arguments: { start: "not a real date" } },
     });
     const res = await waitFor(2);

@@ -307,7 +307,8 @@ const tools = {
         end: endDate.toISOString(),
         duration: formatDuration(Math.abs(diffMs)),
         durationMs: Math.abs(diffMs),
-        direction: diffMs >= 0 ? "end is after start" : "end is before start",
+        direction:
+          diffMs > 0 ? "end is after start" : diffMs < 0 ? "end is before start" : "same",
         note: USAGE_NOTE,
       };
     },
