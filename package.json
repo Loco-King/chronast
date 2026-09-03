@@ -7,7 +7,12 @@
     "start": "node server.js",
     "test": "node test.js"
   },
-  "keywords": ["mcp", "claude-desktop", "time", "clock"],
+  "keywords": [
+    "mcp",
+    "claude-desktop",
+    "time",
+    "clock"
+  ],
   "author": "Loco-King",
   "license": "MIT",
   "homepage": "https://github.com/Loco-King/chronast",
@@ -20,5 +25,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/mcpb": "^2.1.2"
   }
 }
