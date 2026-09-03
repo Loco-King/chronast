@@ -1,0 +1,24 @@
+{
+  "name": "chronast",
+  "version": "2.0.0",
+  "description": "Gives Claude Desktop a real clock — current time/date, elapsed-time tracking, duration math, and timezone conversion. 100% local, no network calls.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "keywords": ["mcp", "claude-desktop", "time", "clock"],
+  "author": "locoking",
+  "license": "MIT",
+  "homepage": "https://github.com/locoking/chronast",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/locoking/chronast"
+  },
+  "bugs": {
+    "url": "https://github.com/locoking/chronast/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  }
+}
