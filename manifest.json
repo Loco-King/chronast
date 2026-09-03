@@ -2,6 +2,7 @@
   "manifest_version": "0.2",
   "name": "chronast",
   "version": "2.0.4",
+  "icon": "icon.png",
   "description": "Chronast gives Claude Desktop a real clock: current time/date (with timezone and unix timestamp), elapsed time since last check with a configurable gap threshold, session duration, arbitrary duration calculation, and timezone conversion — with a built-in rule so Claude never comments on your sleep schedule based on the clock. 100% local, no network calls.",
   "author": {
     "name": "Loco-King"
