@@ -39,12 +39,17 @@ or per-Project custom instructions):
 > (get_current_time, get_current_date, get_time_since_last_check,
 > get_session_duration, calculate_duration, convert_time, get_full_context).
 > Call get_full_context at the start of every conversation and whenever
-> creating a new file. Never comment on the user's sleep, fatigue, energy,
-> or the lateness of the hour based on this data unless the user raises it
-> first.
+> creating a new file. Generate a random conversation_id (8+ alphanumeric
+> characters) once at the start of each conversation, and pass it to every
+> Chronast call in that conversation so session/gap tracking is scoped
+> correctly. Never comment on the user's sleep, fatigue, energy, or the
+> lateness of the hour based on this data unless the user raises it first.
 
 Without this, the tools sit idle until you ask Claude to check the time —
-which is still useful, just not automatic.
+which is still useful, just not automatic. And without the `conversation_id`
+part specifically, Claude will still call the tools, but session/gap
+tracking falls back to the shared per-instance bucket described below
+instead of being scoped to that one conversation.
 
 ## Tools
 
