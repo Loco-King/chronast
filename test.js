@@ -438,8 +438,12 @@ async function main() {
     });
     const res = await waitFor(2);
     const parsed = JSON.parse(res.result.content[0].text);
-    check("get_session_duration: reports newSessionDetected false on first call", () => {
-      assert.strictEqual(parsed.newSessionDetected, false);
+    // Changed in the conversation-scoping fix. This previously asserted
+    // `false`, which encoded the defect: the one call that actually starts
+    // a session reported that it hadn't, because the flag returned only
+    // `gapExceeded` and a first call has no gap to exceed.
+    check("get_session_duration: reports newSessionDetected true on the call that starts a session", () => {
+      assert.strictEqual(parsed.newSessionDetected, true);
     });
     check("get_session_duration: includes a unix timestamp", () => {
       assert.ok(typeof parsed.unixTimestamp === "number" && parsed.unixTimestamp > 0);
@@ -480,6 +484,142 @@ async function main() {
     const parsed = JSON.parse(res.result.content[0].text);
     check("get_full_context: negative gap_threshold_minutes returns an error, not a crash or silent default", () => {
       assert.strictEqual(parsed.error, "gap_threshold_minutes must be zero or positive");
+    });
+  });
+
+  // --- Conversation scoping ---
+
+  const CONV_A = `test-a-${Date.now()}`;
+  const CONV_B = `test-b-${Date.now()}`;
+
+  await runServerTest(async ({ send, waitFor }) => {
+    // Two conversations inside ONE server process must not see each
+    // other's clock. This is the original bug, inverted into a test.
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "get_full_context", arguments: { conversation_id: CONV_A } },
+    });
+    const a = JSON.parse((await waitFor(2)).result.content[0].text);
+    check("conversation scoping: first call in conversation A reports firstCheck true", () => {
+      assert.strictEqual(a.sinceLastCheck.firstCheck, true);
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "get_full_context", arguments: { conversation_id: CONV_B } },
+    });
+    const b = JSON.parse((await waitFor(3)).result.content[0].text);
+    check("conversation scoping: a different conversation in the same process is unaffected by A", () => {
+      assert.strictEqual(b.sinceLastCheck.firstCheck, true);
+    });
+    check("conversation scoping: conversation B session duration is ~0, not A's elapsed time", () => {
+      assert.ok(b.session.durationMs < 50, `expected <50ms, got ${b.session.durationMs}`);
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: { name: "get_full_context", arguments: { conversation_id: CONV_A } },
+    });
+    const a2 = JSON.parse((await waitFor(4)).result.content[0].text);
+    check("conversation scoping: returning to conversation A resumes A's own clock", () => {
+      assert.strictEqual(a2.sinceLastCheck.firstCheck, false);
+      assert.ok(a2.session.durationMs >= 180, `expected >=180ms, got ${a2.session.durationMs}`);
+    });
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
+    // A DIFFERENT process must still recognise conversation A. Under the
+    // old PID-keyed layout this was impossible by construction.
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "get_full_context", arguments: { conversation_id: CONV_A } },
+    });
+    const parsed = JSON.parse((await waitFor(2)).result.content[0].text);
+    check("conversation scoping: conversation state survives a server restart", () => {
+      assert.strictEqual(parsed.sinceLastCheck.firstCheck, false);
+    });
+    check("conversation scoping: a scoped call carries no fallback warning", () => {
+      assert.strictEqual(parsed.warning, undefined);
+    });
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "get_full_context", arguments: {} },
+    });
+    const parsed = JSON.parse((await waitFor(2)).result.content[0].text);
+    check("fallback: omitting conversation_id returns an explicit warning", () => {
+      assert.ok(
+        typeof parsed.warning === "string" && parsed.warning.includes("conversation_id"),
+        `expected a warning mentioning conversation_id, got ${JSON.stringify(parsed.warning)}`
+      );
+    });
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
+    // conversation_id becomes a filename, so traversal and separator
+    // characters must be rejected outright rather than sanitized.
+    for (const [id, bad] of [
+      [2, "../../escape"],
+      [3, ".."],
+      [4, "has/slash"],
+      [5, "way-too-long".repeat(10)],
+    ]) {
+      send({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name: "get_full_context", arguments: { conversation_id: bad } },
+      });
+      const parsed = JSON.parse((await waitFor(id)).result.content[0].text);
+      check(`conversation_id validation rejects ${JSON.stringify(bad).slice(0, 24)}`, () => {
+        assert.ok(typeof parsed.error === "string", `expected an error for ${bad}`);
+      });
+    }
+  });
+
+  await runServerTest(async ({ send, waitFor }) => {
+    // Regression test for the sessionStart hole: get_time_since_last_check
+    // used to write lastCheck without ever initializing sessionStart, so a
+    // later get_session_duration would reset the clock and under-report.
+    const conv = `test-hole-${Date.now()}`;
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "get_time_since_last_check", arguments: { conversation_id: conv } },
+    });
+    await waitFor(2);
+
+    await new Promise((r) => setTimeout(r, 200));
+    send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "get_session_duration", arguments: { conversation_id: conv } },
+    });
+    const parsed = JSON.parse((await waitFor(3)).result.content[0].text);
+    check("get_time_since_last_check initializes sessionStart (no premature reset)", () => {
+      assert.ok(
+        parsed.sessionDurationMs >= 180,
+        `expected session to run from the first call (>=180ms), got ${parsed.sessionDurationMs}`
+      );
+    });
+    check("get_session_duration does not re-flag a session already started", () => {
+      assert.strictEqual(parsed.newSessionDetected, false);
     });
   });
 

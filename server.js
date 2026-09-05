@@ -8,22 +8,26 @@
  * Tools:
  *   get_current_time()
  *   get_current_date()
- *   get_time_since_last_check(gap_threshold_minutes?)
- *   get_session_duration(gap_threshold_minutes?)
+ *   get_time_since_last_check(gap_threshold_minutes?, conversation_id?)
+ *   get_session_duration(gap_threshold_minutes?, conversation_id?)
  *   calculate_duration(start, end?)
  *   convert_time(time?, from_timezone?, to_timezones)
- *   get_full_context(gap_threshold_minutes?)
+ *   get_full_context(gap_threshold_minutes?, conversation_id?)
  *
- * State (last-check timestamp, session start) is persisted to a small
- * JSON file so gaps and durations survive server restarts.
+ * State (last-check timestamp, session start) is persisted so gaps and
+ * durations survive server restarts. One small JSON file per tracked
+ * key, so independent records never share a file and concurrent writers
+ * cannot clobber one another:
  *
- * KNOWN LIMITATION: state is isolated per server process (keyed by PID),
- * not per conversation — Claude Desktop's stdio MCP transport does not
- * expose a conversation identifier to the server. If Desktop spawns one
- * server process per conversation, this gives correct per-conversation
- * isolation. If Desktop reuses one long-lived process across multiple
- * concurrent conversations, session/gap tracking will be shared across
- * them. See README for details.
+ *   ~/.chronast/conversations/<conversation_id>.json
+ *   ~/.chronast/instances/<instance-uuid>.json
+ *
+ * Callers that pass `conversation_id` get true per-conversation tracking
+ * that survives this process being restarted. Callers that omit it fall
+ * back to per-server-instance tracking (the previous behavior), and every
+ * such response carries an explicit warning that session tracking may be
+ * inaccurate — stdio MCP does not expose a conversation identifier to the
+ * server, so the server cannot infer one.
  */
 
 const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
@@ -33,21 +37,55 @@ const {
   ListToolsRequestSchema,
 } = require("@modelcontextprotocol/sdk/types.js");
 
+const crypto = require("crypto");
 const fs = require("fs");
+const fsp = require("fs/promises");
 const os = require("os");
 const path = require("path");
 
 const STATE_DIR = path.join(os.homedir(), ".chronast");
-const STATE_FILE = path.join(STATE_DIR, `state-${process.pid}.json`);
+const CONVERSATIONS_DIR = path.join(STATE_DIR, "conversations");
+const INSTANCES_DIR = path.join(STATE_DIR, "instances");
+
+// Identifies this server process's own state bucket, used when a caller
+// supplies no conversation_id. Deliberately random rather than
+// process.pid: the OS recycles PIDs, and a recycled PID would otherwise
+// inherit a dead process's session clock — the same class of bug this
+// layout exists to fix.
+const INSTANCE_ID = crypto.randomUUID();
 
 // Default gap threshold: how much elapsed real time before we flag the
 // conversation as "not continuous." Callers can override per-call via
 // the gap_threshold_minutes parameter; this is only the fallback.
 const DEFAULT_GAP_THRESHOLD_MS = 6 * 60 * 60 * 1000; // 6 hours
 
-function loadState() {
+// Retention for the background sweep. Conversation records are the
+// valuable ones and are kept for two days of inactivity. Instance records
+// are dead the moment their process exits and nothing can tell the
+// filesystem that happened, so they are held only as long as the gap
+// threshold — past which a session would be considered new anyway, which
+// makes deleting a live instance's record harmless by construction.
+const CONVERSATION_RETENTION_MS = 48 * 60 * 60 * 1000; // 48 hours
+const TMP_RETENTION_MS = 60 * 60 * 1000; // 1 hour
+const SWEEP_THROTTLE_MS = 60 * 60 * 1000; // 1 hour
+
+// A record key becomes a filename, so it is validated rather than
+// sanitized — anything that is not plainly safe is rejected outright.
+// No dots (blocks "." and ".."), no separators, no Windows device names.
+const KEY_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const WINDOWS_RESERVED_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+function isValidKey(key) {
+  return typeof key === "string" && KEY_RE.test(key) && !WINDOWS_RESERVED_RE.test(key);
+}
+
+function recordPath(dir, key) {
+  return path.join(dir, `${key}.json`);
+}
+
+function loadRecord(dir, key) {
   try {
-    const raw = fs.readFileSync(STATE_FILE, "utf8");
+    const raw = fs.readFileSync(recordPath(dir, key), "utf8");
     const parsed = JSON.parse(raw);
     if (
       typeof parsed !== "object" ||
@@ -69,13 +107,18 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function saveState(state) {
+function saveRecord(dir, key, record) {
   try {
-    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true });
     // Atomic write: write to a temp file then rename, so a crash or
     // concurrent read mid-write can't leave a half-written/corrupt file.
-    const tmpFile = `${STATE_FILE}.${process.pid}.tmp`;
-    fs.writeFileSync(tmpFile, JSON.stringify(state, null, 2), "utf8");
+    // Because each key owns its own file, this is also all the mutual
+    // exclusion needed — two processes writing different keys never touch
+    // the same file, and two writing the same key are both writing
+    // "lastCheck = now", so last-writer-wins is correct there.
+    const stateFile = recordPath(dir, key);
+    const tmpFile = `${stateFile}.${process.pid}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(record, null, 2), "utf8");
 
     // On Windows, renaming over STATE_FILE can transiently fail with
     // EPERM/EBUSY if something else (commonly antivirus real-time
@@ -84,7 +127,7 @@ function saveState(state) {
     const maxAttempts = 5;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        fs.renameSync(tmpFile, STATE_FILE);
+        fs.renameSync(tmpFile, stateFile);
         return;
       } catch (err) {
         const retryable = err.code === "EPERM" || err.code === "EBUSY";
@@ -97,6 +140,91 @@ function saveState(state) {
     // each time. Still safe to continue.
     console.error("chronast: failed to save state:", err.message);
   }
+}
+
+// The single place session lifecycle is decided. Every stateful tool
+// routes through this, so "first call", "gap exceeded" and "session
+// started" cannot drift apart between tools.
+function touchSession(record, now, gapThresholdMs) {
+  const wasUninitialized = record.sessionStart === null;
+  const gapExceeded =
+    record.lastCheck !== null && now - record.lastCheck > gapThresholdMs;
+  if (wasUninitialized || gapExceeded) {
+    record.sessionStart = now;
+  }
+  const firstCheck = record.lastCheck === null;
+  record.lastCheck = now;
+  // newSession covers both routes into a fresh session. Reporting only
+  // gapExceeded means the one call that actually starts a session always
+  // claims it didn't.
+  return { firstCheck, gapExceeded, newSession: wasUninitialized || gapExceeded };
+}
+
+// Chooses which record a call operates on. A supplied conversation_id
+// gives real per-conversation scoping; its absence falls back to this
+// process's own bucket, which is the old behavior and is flagged as such
+// in the response rather than passing silently.
+function resolveTarget(args) {
+  const raw = args ? args.conversation_id : undefined;
+  if (raw === undefined || raw === null) {
+    return { dir: INSTANCES_DIR, key: INSTANCE_ID, scoped: false };
+  }
+  if (!isValidKey(raw)) {
+    return {
+      error:
+        "conversation_id must be 1-64 characters of A-Z, a-z, 0-9, underscore " +
+        "or hyphen, and must not be a reserved device name.",
+    };
+  }
+  return { dir: CONVERSATIONS_DIR, key: raw, scoped: true };
+}
+
+// Best-effort removal of records nothing will read again, plus temp files
+// orphaned by a crash between write and rename. Tolerates ENOENT
+// throughout: a concurrent sweep winning the race is success, not failure.
+async function sweepDir(dir, maxIdleMs, now) {
+  let names;
+  try {
+    names = await fsp.readdir(dir);
+  } catch {
+    return; // directory does not exist yet
+  }
+  for (const name of names) {
+    const isTmp = name.endsWith(".tmp");
+    if (!isTmp && !name.endsWith(".json")) continue;
+    const idleLimit = isTmp ? TMP_RETENTION_MS : maxIdleMs;
+    const file = path.join(dir, name);
+    try {
+      if (now - (await fsp.stat(file)).mtimeMs <= idleLimit) continue;
+      // Re-check immediately before unlinking: a record can be refreshed
+      // by a live call between the first stat and here. This narrows the
+      // window to microseconds, and losing that race only resets one
+      // record's clock — it cannot corrupt anything.
+      if (now - (await fsp.stat(file)).mtimeMs <= idleLimit) continue;
+      await fsp.unlink(file);
+    } catch {
+      // Vanished mid-sweep, or held open — leave it for the next pass.
+    }
+  }
+}
+
+async function sweep(gapThresholdMs = DEFAULT_GAP_THRESHOLD_MS) {
+  const now = Date.now();
+  await sweepDir(CONVERSATIONS_DIR, CONVERSATION_RETENTION_MS, now);
+  await sweepDir(INSTANCES_DIR, gapThresholdMs, now);
+}
+
+// Sweeping at startup means the thing that creates the garbage (a new
+// process) is also what triggers collection. This throttled call covers
+// the remaining case: a long-lived process that never restarts and so
+// never sweeps again. In-memory, so it costs nothing on disk and resets
+// naturally with the process.
+let lastSweepAt = 0;
+function maybeSweep(gapThresholdMs) {
+  const now = Date.now();
+  if (now - lastSweepAt < SWEEP_THROTTLE_MS) return;
+  lastSweepAt = now;
+  sweep(gapThresholdMs).catch(() => {});
 }
 
 function formatDuration(ms) {
@@ -199,6 +327,29 @@ const GAP_PARAM_SCHEMA = {
   },
 };
 
+const CONVERSATION_PARAM_SCHEMA = {
+  conversation_id: {
+    type: "string",
+    description:
+      "Optional but strongly recommended. A stable identifier for the " +
+      "current conversation, minted once on the first chronast call of a " +
+      "conversation and reused for every later call in it. 1-64 " +
+      "characters of A-Z, a-z, 0-9, underscore or hyphen. Without it the " +
+      "server cannot tell conversations apart and falls back to tracking " +
+      "this server process instead, which will report time from unrelated " +
+      "conversations that share the process.",
+  },
+};
+
+// Surfaced on every response that had to fall back to process-scoped
+// tracking. Until callers reliably supply an id this is the common path,
+// not an edge case, and a silent fallback is indistinguishable in the
+// output from a correctly scoped call.
+const NO_CONVERSATION_ID_WARNING =
+  "No conversation_id supplied — session and gap tracking fall back to " +
+  "this server process and may include time from other conversations. " +
+  "Pass conversation_id for accurate per-conversation tracking.";
+
 const tools = {
   get_current_time: {
     description:
@@ -256,7 +407,7 @@ const tools = {
       USAGE_NOTE,
     inputSchema: {
       type: "object",
-      properties: { ...GAP_PARAM_SCHEMA },
+      properties: { ...GAP_PARAM_SCHEMA, ...CONVERSATION_PARAM_SCHEMA },
       additionalProperties: false,
     },
     handler: (args) => {
@@ -266,8 +417,18 @@ const tools = {
         return { error: gapThreshold.error, note: USAGE_NOTE };
       }
       const gapThresholdMs = gapThreshold.ms;
-      const state = loadState();
-      const lastCheck = state.lastCheck;
+      const target = resolveTarget(args);
+      if (target.error) {
+        return { error: target.error, note: USAGE_NOTE };
+      }
+      const record = loadRecord(target.dir, target.key);
+      const lastCheck = record.lastCheck;
+
+      // Routed through touchSession so this tool can no longer leave
+      // sessionStart uninitialized for another tool to reset later.
+      touchSession(record, now, gapThresholdMs);
+      saveRecord(target.dir, target.key, record);
+      maybeSweep(gapThresholdMs);
 
       let result;
       if (lastCheck === null) {
@@ -286,10 +447,12 @@ const tools = {
         };
       }
 
-      state.lastCheck = now;
-      saveState(state);
-
-      return { ...result, unixTimestamp: Math.floor(now / 1000), note: USAGE_NOTE };
+      return {
+        ...result,
+        unixTimestamp: Math.floor(now / 1000),
+        ...(target.scoped ? {} : { warning: NO_CONVERSATION_ID_WARNING }),
+        note: USAGE_NOTE,
+      };
     },
   },
 
@@ -302,7 +465,7 @@ const tools = {
       USAGE_NOTE,
     inputSchema: {
       type: "object",
-      properties: { ...GAP_PARAM_SCHEMA },
+      properties: { ...GAP_PARAM_SCHEMA, ...CONVERSATION_PARAM_SCHEMA },
       additionalProperties: false,
     },
     handler: (args) => {
@@ -312,23 +475,23 @@ const tools = {
         return { error: gapThreshold.error, note: USAGE_NOTE };
       }
       const gapThresholdMs = gapThreshold.ms;
-      const state = loadState();
-
-      const gapExceeded =
-        state.lastCheck !== null && now - state.lastCheck > gapThresholdMs;
-
-      if (state.sessionStart === null || gapExceeded) {
-        state.sessionStart = now;
+      const target = resolveTarget(args);
+      if (target.error) {
+        return { error: target.error, note: USAGE_NOTE };
       }
-      state.lastCheck = now;
-      saveState(state);
+      const record = loadRecord(target.dir, target.key);
 
-      const elapsedMs = now - state.sessionStart;
+      const { newSession } = touchSession(record, now, gapThresholdMs);
+      saveRecord(target.dir, target.key, record);
+      maybeSweep(gapThresholdMs);
+
+      const elapsedMs = now - record.sessionStart;
       return {
         sessionDuration: formatDuration(elapsedMs),
         sessionDurationMs: elapsedMs,
-        newSessionDetected: gapExceeded,
+        newSessionDetected: newSession,
         unixTimestamp: Math.floor(now / 1000),
+        ...(target.scoped ? {} : { warning: NO_CONVERSATION_ID_WARNING }),
         note: USAGE_NOTE,
       };
     },
@@ -508,7 +671,7 @@ const tools = {
       USAGE_NOTE,
     inputSchema: {
       type: "object",
-      properties: { ...GAP_PARAM_SCHEMA },
+      properties: { ...GAP_PARAM_SCHEMA, ...CONVERSATION_PARAM_SCHEMA },
       additionalProperties: false,
     },
     handler: (args) => {
@@ -518,11 +681,15 @@ const tools = {
         return { error: gapThreshold.error, note: USAGE_NOTE };
       }
       const gapThresholdMs = gapThreshold.ms;
+      const target = resolveTarget(args);
+      if (target.error) {
+        return { error: target.error, note: USAGE_NOTE };
+      }
       const nowDate = new Date(now);
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const state = loadState();
+      const record = loadRecord(target.dir, target.key);
 
-      const lastCheck = state.lastCheck;
+      const lastCheck = record.lastCheck;
       let sinceLastCheck;
       if (lastCheck === null) {
         sinceLastCheck = {
@@ -540,14 +707,11 @@ const tools = {
         };
       }
 
-      const gapExceeded = lastCheck !== null && now - lastCheck > gapThresholdMs;
-      if (state.sessionStart === null || gapExceeded) {
-        state.sessionStart = now;
-      }
-      state.lastCheck = now;
-      saveState(state);
+      const { newSession } = touchSession(record, now, gapThresholdMs);
+      saveRecord(target.dir, target.key, record);
+      maybeSweep(gapThresholdMs);
 
-      const sessionElapsedMs = now - state.sessionStart;
+      const sessionElapsedMs = now - record.sessionStart;
 
       return {
         time: nowDate.toLocaleTimeString(),
@@ -560,8 +724,9 @@ const tools = {
         session: {
           duration: formatDuration(sessionElapsedMs),
           durationMs: sessionElapsedMs,
-          newSessionDetected: gapExceeded,
+          newSessionDetected: newSession,
         },
+        ...(target.scoped ? {} : { warning: NO_CONVERSATION_ID_WARNING }),
         note: USAGE_NOTE,
       };
     },
@@ -569,7 +734,7 @@ const tools = {
 };
 
 const server = new Server(
-  { name: "chronast", version: "2.0.0" },
+  { name: "chronast", version: "2.1.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -596,6 +761,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // After the transport is up, never before — this must not delay the MCP
+  // handshake. Fire-and-forget, and deliberately not a timer: a live
+  // setInterval would keep the event loop alive and stop this process
+  // exiting when the client closes stdin.
+  lastSweepAt = Date.now();
+  sweep().catch(() => {});
 }
 
 main().catch((err) => {

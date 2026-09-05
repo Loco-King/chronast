@@ -35,7 +35,7 @@ To get the "always aware of the time" behavior, add something like this to
 your Claude memory or custom instructions (Settings → Personal Preferences,
 or per-Project custom instructions):
 
-> User has Chronast installed in Claude Desktop with N tools
+> User has Chronast installed in Claude Desktop with 7 tools
 > (get_current_time, get_current_date, get_time_since_last_check,
 > get_session_duration, calculate_duration, convert_time, get_full_context).
 > Call get_full_context at the start of every conversation and whenever
@@ -73,22 +73,38 @@ sleep, fatigue, energy, or the lateness of the hour unless the user brings
 it up first. This travels with the data itself so it survives regardless
 of which tool is called.
 
-## Known limitation: state isolation across concurrent conversations
+## Conversation scoping
 
-Chronast persists a small amount of state (last-check time, session
-start) to `~/.chronast/state-<pid>.json`, keyed by the server process's
-PID. This means:
+`get_time_since_last_check`, `get_session_duration`, and
+`get_full_context` accept an optional `conversation_id` — a stable string
+identifying the current conversation, minted once on the first Chronast
+call of that conversation and reused for every later call in it. 1–64
+characters of `A–Z`, `a–z`, `0–9`, underscore or hyphen.
 
-- If Claude Desktop spawns a separate server process per conversation,
-  state is correctly isolated per conversation.
-- If Claude Desktop reuses a single long-lived server process across
-  multiple simultaneous conversations, session/gap tracking will be
-  shared across those conversations rather than tracked independently.
+Supplying it scopes session and gap tracking to that conversation, and
+that tracking survives the server process being restarted. Omitting it
+falls back to tracking the server process itself, which is shared by every
+conversation that process serves.
 
-There is currently no way for a stdio MCP server to receive a
-conversation identifier from the client, so this can't be fully resolved
-from the server side. In practice, most single-conversation usage is
-unaffected.
+## Known limitation: conversations that don't identify themselves
+
+Chronast persists a small amount of state (last-check time, session start)
+under `~/.chronast/`, as one file per tracked record — `conversations/<id>.json`
+when `conversation_id` is supplied, `instances/<uuid>.json` when it isn't.
+
+A stdio MCP server has no way to learn a conversation identifier on its
+own, so the fallback can't be removed from the server side: a client that
+never passes `conversation_id` will still see session and gap time shared
+across every conversation sharing a server process. Responses in that case
+carry an explicit `warning` field saying so, so a scoped call and a
+fallback call are distinguishable in the output rather than silently
+identical.
+
+Records are removed automatically once stale — conversation records after
+48 hours idle, instance records after the gap threshold.
+
+Upgrading from 2.0.x leaves the old `state-<pid>.json` files in
+`~/.chronast/` behind. They are no longer read and can be deleted.
 
 ## Uninstalling
 
